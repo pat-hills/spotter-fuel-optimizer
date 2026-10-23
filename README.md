@@ -154,27 +154,3 @@ The API response includes GeoJSON. A minimal frontend can render `response.route
 ## Postman demo
 
 Import `postman/Spotter-Fuel-Optimizer.postman_collection.json` into Postman. Start the API and set the collection variable `base_url` to the deployed URL or `http://localhost:8000`. The collection includes a Columbus-to-Chicago request and basic response assertions. The request succeeds only after the fuel CSV has been imported and station geocoding has produced adequate route coverage.
-
-## Suggested five-minute walkthrough
-
-1. **0:00–0:30** — State the problem, fixed assumptions, and API contract.
-2. **0:30–1:30** — Show the project structure: API view/serializer, planning service, routing adapter, station repository, pure optimizer.
-3. **1:30–2:15** — Explain the CSV import and coordinate-enrichment workflow, including the no-coordinate data limitation.
-4. **2:15–3:45** — Send the Postman request; inspect GeoJSON route, selected fuel stops, per-stop gallons/cost, and assumptions.
-5. **3:45–4:30** — Explain caching: route response and full plan are cached; no routing call is made per fuel stop.
-6. **4:30–5:00** — Mention tests, deployment configuration, geocoding accuracy limitations, and the production upgrade path (PostGIS and a managed/self-hosted routing provider).
-
-## Push to GitHub
-
-Create an empty repository on GitHub, then from this project directory run:
-
-```bash
-git init
-git add .
-git commit -m "Build fuel route optimization API"
-git branch -M main
-git remote add origin https://github.com/<your-account>/<repository-name>.git
-git push -u origin main
-```
-
-Do not commit `.env` or secrets. Keep the assessment CSV only if the hiring team permits redistributing the supplied file in the repository.
