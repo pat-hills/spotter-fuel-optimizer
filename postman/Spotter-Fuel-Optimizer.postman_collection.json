@@ -1,0 +1,46 @@
+{
+  "info": {
+    "name": "Spotter Fuel Optimizer",
+    "description": "Demo request for the Spotter AI backend take-home assessment.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Optimize fuel stops — Columbus to Chicago",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"start\": \"Columbus, Ohio\",\n  \"finish\": \"Chicago, Illinois\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/fuel-plans/optimize/",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "fuel-plans", "optimize"]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Returns HTTP 200', function () { pm.response.to.have.status(200); });",
+              "pm.test('Includes route geometry and fuel plan', function () {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body).to.have.property('route');",
+              "  pm.expect(body.route.geometry).to.have.property('coordinates');",
+              "  pm.expect(body).to.have.property('stops');",
+              "  pm.expect(body).to.have.property('fuel_purchase_cost_usd');",
+              "  pm.expect(body).to.have.property('assumptions');",
+              "});"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [{ "key": "base_url", "value": "http://localhost:8000", "type": "string" }]
+}
