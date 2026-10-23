@@ -1,75 +1,138 @@
 # Spotter AI — Fuel Route Optimizer
 
-A Django REST API take-home implementation that returns a US driving route, fuel-stop recommendations, and an estimated fuel-purchase cost using the supplied assessment CSV.
+A Django REST API that returns a US driving route, recommends fuel stops along the route, and estimates fuel-purchase and total trip fuel costs using fuel-price data.
 
 ## Design overview
 
-- **API layer** validates HTTP input and formats HTTP responses only.
-- **FuelPlanningService** coordinates geocoding, routing, station discovery, and optimization.
-- **OsrmRoutingService** isolates the routing provider and requests the full GeoJSON route in one call per uncached route.
-- **CensusGeocoder** isolates single-location geocoding and caches resolved start/finish locations.
-- **FuelStation repository** owns the station query used by the planner.
-- **Fuel optimization service** is a pure function with no Django, HTTP, or database dependencies.
-- **PostgreSQL** stores fuel prices and geocoded station locations; Redis is used for shared caching when configured.
+- **API layer:** Validates HTTP input and formats API responses.
+- **FuelPlanningService:** Coordinates geocoding, routing, station discovery, and fuel optimization.
+- **GoogleMapsGeocoder:** Uses the Google Maps Geocoding API to resolve trip start and finish addresses and caches resolved coordinates.
+- **GooglePlacesGeocoder:** Uses Google Places Text Search to find candidate fuel-station locations for review. Candidate results are not automatically treated as verified station coordinates.
+- **OsrmRoutingService:** Uses OSRM to obtain driving distance, duration, and full GeoJSON route geometry in one request for each uncached route.
+- **Census batch geocoder:** Enriches fuel-station coordinates using the US Census Geocoder during data preparation.
+- **FuelStation repository:** Provides database queries for fuel stations near the route corridor.
+- **Fuel optimization service:** Implements the refuelling logic independently of Django, HTTP requests, and database operations.
+- **PostgreSQL:** Stores fuel prices and station locations. Redis provides shared caching when configured.
 
-The route is returned as GeoJSON in the API response. A client can render it using Leaflet and OpenStreetMap tiles. The API does not generate a raster map image.
+The API returns route geometry as GeoJSON. A client can render the route using Leaflet and OpenStreetMap tiles. The API does not generate a raster map image. Google Maps is used for geocoding and station candidate searches, not for calculating the road route.
 
 ## Important data caveat
 
-The assessment CSV has 8,151 rows and columns for truck-stop ID, name, address, city, state, rack ID, and retail price. It contains no latitude/longitude. Fuel-stop optimization cannot be geographically correct until coordinates are added.
+The assessment CSV contains 8,151 rows with truck-stop ID, name, address, city, state, rack ID, and retail price. It does not include latitude or longitude. Fuel-stop recommendations depend on adding usable coordinates to the station records.
 
-`import_fuel_prices` loads the original records. `geocode_fuel_stations` uses the US Census Geocoder's batch endpoint. Truck-stop addresses written as highway exits may not resolve to an exact POI; unmatched rows are not silently treated as exact locations. Check the geocoding report and sample the results against a map before relying on the plan. For a production system, use a verified station-coordinate dataset or a geocoder with licensed POI coverage and retain match confidence/provenance. The batch geocoder is a one-time data-preparation step, not called for each trip.
+The `import_fuel_prices` command imports the original records. The `geocode_fuel_stations` command uses the US Census Geocoder's batch endpoint to enrich station coordinates.
+
+Truck-stop addresses that use highway exits or other non-standard address formats may not resolve to the exact station. Unmatched or ambiguous records must not be treated as verified locations. Review the geocoding report and sample station coordinates against a map before relying on a route plan.
+
+The Google Places search and station-review utilities can help identify candidate locations. Candidate matches should be reviewed before being approved as station coordinates.
+
+For production use, prefer a verified station-coordinate dataset or an appropriately licensed geocoding provider. Retain coordinate provenance, match status, and review information.
+
+Bulk geocoding is a data-preparation operation; it is not performed for every trip.
 
 ## Fuel model and assumptions
 
-- Maximum range: **500 miles** on a full tank.
-- Fuel economy: **10 miles per gallon**.
-- Implied tank capacity: **50 gallons**.
-- Starting state: **full tank**.
-- `fuel_purchase_cost_usd` includes purchases made at stops during the journey. The starting tank is treated as sunk fuel and its original cost is not included. Consequently, a trip no longer than the available starting range can legitimately have zero *in-trip purchases*. If the assessor expects total fuel consumed valued at market prices instead, define that accounting convention explicitly before comparing outputs.
-- Stations are filtered to a route corridor and ordered by along-route mile marker. The initial implementation uses a greedy refuelling strategy: if a cheaper station is reachable within a full tank, purchase only enough to reach the next cheaper station; otherwise, fill as needed. It is designed for a fixed route and fixed tank size.
-- Stations with missing coordinates or invalid prices are excluded. If the route cannot be completed using the available station coverage, the API returns HTTP 422 instead of inventing a fuel stop.
-- Route distance comes from OSRM; route-mile station positions are approximated from the returned geometry. Station locations may also be approximate if the source address could not be geocoded exactly.
+- **Maximum vehicle range:** 500 miles on a full tank.
+- **Fuel economy:** 10 miles per gallon.
+- **Implied tank capacity:** 50 gallons.
+- **Starting fuel:** A full 50-gallon tank.
+- **Arrival reserve:** The planner targets a 2-gallon fuel reserve.
+- **Planned refuelling legs:** The optimizer limits planned legs to 480 miles to preserve the arrival reserve under the stated fuel-economy assumption.
+
+`fuel_purchase_cost_usd` represents the estimated cost of fuel purchased at stops during the trip. Fuel already in the starting tank is not included in that purchase total.
+
+`estimated_total_trip_fuel_cost_usd` is a separate estimate that values all fuel consumed using the average price of available route candidates, or the dataset-wide average if route-candidate prices are unavailable. It is an estimate, not a sum of the selected stop purchases.
+
+The planner filters stations to a corridor around the route and calculates each candidate's approximate position along the route. It considers station prices and reachability when selecting fuel stops.
+
+Stations with missing coordinates or invalid prices are excluded. If the available station coverage cannot support a feasible trip plan, the API returns an error rather than inventing a fuel stop.
+
+Route distance and duration come from OSRM. Station positions are approximated from the returned route geometry, and station coordinates may be approximate when an address cannot be geocoded precisely.
 
 ## Requirements
 
-- Python 3.13+
-- Docker and Docker Compose (recommended)
-- The public OSRM and US Census geocoder endpoints must be reachable for uncached requests / initial data enrichment.
+- Python 3.13 or later.
+- Docker and Docker Compose (recommended).
+- PostgreSQL.
+- Redis (optional; local-memory caching is used when Redis is not configured).
+- Google Maps Platform API key for uncached trip-address geocoding and Google Places station searches.
+- Network access to the US Census Geocoder for initial station-coordinate enrichment.
+- Network access to OSRM for uncached routes.
 
-Django 6.1.2 is pinned as the current stable release at the time this project was prepared. Dependencies are pinned in `requirements.txt` for reproducibility.
+Dependencies are pinned in `requirements.txt`.
+
+## External services
+
+### Google Maps Platform
+
+The application uses:
+
+- **Geocoding API:** Resolves the trip's start and finish addresses.
+- **Places API (New):** Searches for candidate fuel-station locations during the station review workflow.
+
+Configure the following environment variables:
+
+```dotenv
+GOOGLE_MAPS_API_KEY=replace-with-your-google-maps-api-key
+GOOGLE_MAPS_TIMEOUT_SECONDS=10
+```
+
+Enable the relevant Google Maps Platform APIs and billing in Google Cloud. Restrict the API key to the required APIs and any applicable restrictions.
+
+Keep the real API key in your local `.env` file or deployment secret store. Never commit the real key to GitHub.
+
+For Docker Compose, ensure the Google Maps variables are passed into the `api` container through its environment configuration. Do not rely on including a local `.env` file in the Docker image.
+
+### US Census Geocoder
+
+The batch geocoder enriches fuel-station coordinates during data preparation. Set `GEOCODING_USER_AGENT` to identify the application and provide a valid contact email, as required by the command.
+
+### OSRM
+
+OSRM supplies driving routes, distances, durations, and GeoJSON geometry. Route responses are cached to reduce repeated routing requests.
+
+The public OSRM service is suitable for an assessment demonstration, not a production service-level guarantee. A production deployment should evaluate a managed or self-hosted routing provider.
 
 ## Run locally with Docker
 
-1. Copy `.env.example` to `.env` and set a unique `DJANGO_SECRET_KEY` and database password for anything beyond local development.
-2. Start services:
+1. Copy `.env.example` to `.env` and configure the application settings. Set a unique `DJANGO_SECRET_KEY`, an appropriate database password, the Google Maps API key, and a valid geocoding contact address.
+
+2. Make sure the Google Maps environment variables are passed to the `api` service in `docker-compose.yml`. The relevant entries under `api.environment` are:
+
+   ```yaml
+   GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+   GOOGLE_MAPS_TIMEOUT_SECONDS: ${GOOGLE_MAPS_TIMEOUT_SECONDS:-10}
+   ```
+
+3. Start the services:
 
    ```bash
    docker compose up --build -d
    ```
 
-3. Copy the provided CSV into the repository (or use its absolute path) and import it:
+4. Obtain the assessment CSV according to the assessment's distribution rules. Place it in the project directory or copy it into the running API container. Import it into the database:
 
    ```bash
    docker compose exec api python manage.py import_fuel_prices /app/fuel-prices-for-be-assessment.csv
    ```
 
-   If the CSV is not in the image/container, copy it first with `docker cp` or mount it as a volume. Example:
+   If the CSV is not available inside the container, copy it first:
 
    ```bash
    docker cp fuel-prices-for-be-assessment.csv $(docker compose ps -q api):/tmp/fuel-prices.csv
+
    docker compose exec api python manage.py import_fuel_prices /tmp/fuel-prices.csv
    ```
 
-4. Geocode the station data in one batch request:
+5. Enrich the station coordinates:
 
    ```bash
    docker compose exec api python manage.py geocode_fuel_stations
    ```
 
-   Review the matched/unmatched totals. Do not use the API for a route where station coverage is inadequate.
+   Review the matched, unmatched, and ambiguous results. Do not assume the dataset has sufficient verified station coverage for every route.
 
-5. Submit a trip:
+6. Submit a trip request:
 
    ```bash
    curl -X POST http://localhost:8000/api/v1/fuel-plans/optimize/ \
@@ -79,23 +142,50 @@ Django 6.1.2 is pinned as the current stable release at the time this project wa
 
 ## Run locally without Docker
 
-Create a virtual environment, install requirements, create a PostgreSQL database, set environment variables, then run:
+Create a virtual environment, install the dependencies, configure PostgreSQL, and set the environment variables.
 
 ```bash
 python -m venv .venv
-# Windows PowerShell: .venv\Scripts\Activate.ps1
-# macOS/Linux: source .venv/bin/activate
+```
+
+Activate it on Windows PowerShell:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+On macOS or Linux:
+
+```bash
+source .venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
 pip install -r requirements.txt
-$env:DJANGO_SETTINGS_MODULE = "config.settings.development" # PowerShell
+```
+
+Copy `.env.example` to `.env`, configure the settings described above, and set the Django settings module.
+
+Windows PowerShell:
+
+```powershell
+$env:DJANGO_SETTINGS_MODULE = "config.settings.development"
+```
+
+Run the database migrations and start Django:
+
+```bash
 python manage.py migrate
 python manage.py runserver
 ```
 
-Import and geocode the CSV using the commands above. Use `.env.example` as the configuration reference.
+Import the assessment CSV and enrich the station coordinates using the management commands described in the Docker instructions.
 
 ## API contract
 
-`POST /api/v1/fuel-plans/optimize/`
+**Endpoint:** `POST /api/v1/fuel-plans/optimize/`
 
 Request:
 
@@ -106,51 +196,84 @@ Request:
 }
 ```
 
-Successful response includes:
+The successful response includes:
 
-- `route`: GeoJSON `Feature` containing route geometry suitable for a map client.
-- `route_distance_miles` and `route_duration_seconds`.
-- `stops`: ordered fuel stops with price, route mile, purchase gallons, cost, and fuel level on arrival/departure.
-- `fuel_purchase_cost_usd`: estimated cost of fuel purchased during the journey.
-- `estimated_fuel_consumed_gallons`: route distance divided by 10 MPG.
-- `assumptions`, `map_attribution`, and `station_location_quality`.
+- `start` and `finish`: Requested addresses and resolved coordinates.
+- `route`: A GeoJSON `Feature` containing route geometry.
+- `route_distance_miles` and `route_duration_seconds`: Route distance and estimated driving duration.
+- `stops`: Ordered fuel stops, including station coordinates, price per gallon, route mile, distance from the route, gallons to purchase, estimated purchase cost, and fuel on arrival and departure.
+- `fuel_purchase_cost_usd`: Estimated cost of fuel purchased at the recommended stops.
+- `estimated_fuel_consumed_gallons`: Estimated fuel consumption based on route distance and 10 MPG.
+- `estimated_total_trip_fuel_cost_usd`: Estimated cost of all fuel consumed, using the documented average-price method.
+- `assumptions`: The fuel model and planning assumptions.
+- `map_attribution`: Attribution information for the routing data.
+- `station_location_quality`: A description of station-location accuracy limitations.
 
-Errors use a stable envelope. Examples include `400` for invalid input, `422` when a location cannot be resolved or fuel coverage is insufficient, and `502` when the routing provider is unavailable.
+Errors use a consistent API error response. Typical status codes include `400` for invalid input, `422` when a location cannot be resolved or station coverage is insufficient, and `502` when a routing provider is unavailable.
 
-## External service calls and latency
+## External service calls and caching
 
-- One Census geocoding request per uncached trip endpoint (start and finish; cached for 30 days).
-- One OSRM route request per uncached origin/destination pair (cached for one hour by default).
-- Fuel station lookup and optimization are local database / application operations; no per-stop routing calls are made.
-- Configure Redis via `CACHE_URL` in deployed environments. The local-memory cache is only appropriate for a single-process development setup.
-- Public OSRM is a best-effort demo service with usage restrictions and no uptime guarantee. It is appropriate for an assessment demo, not a production SLA. Keep the provider adapter and deploy a managed or self-hosted routing service for production traffic. Display OpenStreetMap attribution.
+- **Google Maps Geocoding API:** Resolves uncached trip endpoints. Successful geocoding results are cached for 30 days.
+- **Google Places API (New):** Searches for fuel-station candidates as part of the location-review workflow. Successful searches are cached for 30 days.
+- **US Census Geocoder:** Used for batch enrichment of fuel-station coordinates during data preparation.
+- **OSRM:** Makes one route request for each uncached origin/destination pair by default. Route caching is configured through `ROUTING_CACHE_SECONDS`, which defaults to one hour.
+- **Fuel station discovery and optimization:** Performed by the application and database; the planner does not make an individual routing request for every fuel stop.
+
+Configure Redis using `CACHE_URL` in deployed environments. Local-memory caching is appropriate only for a single-process development setup.
 
 ## Tests and quality checks
 
+Run the tests:
+
 ```bash
-pytest
+python -m pytest -q
+```
+
+Run Ruff:
+
+```bash
 ruff check .
+```
+
+Check Django configuration:
+
+```bash
 python manage.py check
+```
+
+Check for uncommitted migration changes:
+
+```bash
 python manage.py makemigrations --check --dry-run
 ```
 
-Tests cover the optimizer's core behaviors, geographic distance helpers, and request validation. Provider calls should be mocked in integration tests when expanding this project. Before submission, run the tests against a real PostgreSQL instance and add a route-planning integration test with a fixed GeoJSON fixture.
+The test suite covers core optimizer behavior, geographic distance helpers, and API request validation. Provider interactions should be mocked in automated tests where appropriate, and route-planning integration tests should use fixed route fixtures for deterministic results.
 
-## Production hardening checklist
+Before deploying, run the tests against PostgreSQL and validate the end-to-end flow using representative route data.
 
-- Set a high-entropy secret key; set `DJANGO_DEBUG=false`; configure allowed hosts and HTTPS.
-- Use managed PostgreSQL, Redis, TLS, backups, connection pooling, and database monitoring.
-- Add authentication / per-customer quotas if the API is not intentionally public.
+## Production hardening
+
+Before using this application in production:
+
+- Set a high-entropy Django secret key, disable debug mode, configure allowed hosts, and enforce HTTPS.
+- Use managed PostgreSQL and Redis, database backups, TLS, connection pooling, and monitoring.
+- Restrict API access or introduce authentication and customer-specific rate limits where appropriate.
 - Add provider circuit breakers, bounded retries, request correlation IDs, metrics, and structured logs.
-- Add idempotent data refreshes and source timestamps for changing fuel prices.
-- Validate geocoding accuracy and station freshness; city-level coordinates are not precise enough for final production recommendations.
-- For materially larger station datasets, replace float bounding-box scans with PostGIS `geography` columns and a GiST index. Benchmark representative cross-country routes and concurrent traffic before claiming a particular scale.
-- Add CI that runs formatting, linting, tests, migration checks, dependency vulnerability scans, and container image scans.
+- Add idempotent data-refresh jobs and source timestamps for fuel prices.
+- Validate station coordinates and data freshness. City-level approximations are not precise enough for reliable production recommendations.
+- Consider PostGIS geography columns and GiST indexes for larger station datasets. Benchmark representative routes and concurrent traffic before making scalability claims.
+- Add continuous integration for linting, tests, migration checks, dependency vulnerability checks, and container image scans.
 
 ## Map display
 
-The API response includes GeoJSON. A minimal frontend can render `response.route.geometry` as a polyline and add markers for each item in `response.stops`. Use a maintained Leaflet release and include visible OpenStreetMap attribution. Keeping visualization on the client avoids coupling the API to a map-rendering framework.
+The API returns route geometry as GeoJSON. A client can render `response.route.geometry` as a polyline and add markers for each item in `response.stops`.
+
+Use a maintained Leaflet release and display visible OpenStreetMap attribution when using OpenStreetMap tiles. Map visualization is kept separate from the API so clients can render the route without coupling the backend to a map-rendering framework.
 
 ## Postman demo
 
-Import `postman/Spotter-Fuel-Optimizer.postman_collection.json` into Postman. Start the API and set the collection variable `base_url` to the deployed URL or `http://localhost:8000`. The collection includes a Columbus-to-Chicago request and basic response assertions. The request succeeds only after the fuel CSV has been imported and station geocoding has produced adequate route coverage.
+Import `postman/Spotter-Fuel-Optimizer.postman_collection.json` into Postman.
+
+Set the collection variable `base_url` to the deployed API URL or `http://localhost:8000`.
+
+The collection includes a Columbus-to-Chicago request and basic response assertions. The request succeeds only when the database has been populated with fuel-price data and station geocoding has provided sufficient route coverage.
