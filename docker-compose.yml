@@ -29,6 +29,8 @@
       POSTGRES_HOST: db
       CACHE_URL: redis://redis:6379/1
       DJANGO_SETTINGS_MODULE: config.settings.development
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+      GOOGLE_MAPS_TIMEOUT_SECONDS: ${GOOGLE_MAPS_TIMEOUT_SECONDS:-10}
     ports:
       - "8000:8000"
     depends_on:
